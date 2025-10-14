@@ -8,6 +8,7 @@ import uploadRoutes from "./routes/upload.js";
 import searchRoutes from "./routes/search.js";
 import deleteShopProducts from "./routes/deleteShopProducts.js"
 import syncShopify from "./routes/syncShopify.js"
+import productRoutes from './routes/productRoutes.js';
 
 dotenv.config();
 const app = express();
@@ -20,6 +21,7 @@ app.use(morgan("dev"));
 // db
 await connectDB();
 
+app.use('/', productRoutes);
 // routes
 app.use(uploadRoutes);
 // fillter all the prodcuts
