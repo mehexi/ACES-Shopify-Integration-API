@@ -9,6 +9,7 @@ import searchRoutes from "./routes/search.js";
 import deleteShopProducts from "./routes/deleteShopProducts.js"
 import syncShopify from "./routes/syncShopify.js"
 import productRoutes from './routes/productRoutes.js';
+import acesRoutes from './routes/acesRoutes.js';
 
 dotenv.config();
 const app = express();
@@ -30,6 +31,8 @@ app.use(searchRoutes);
 app.use("/", deleteShopProducts);
 //sync to shopify
 app.use("/",syncShopify)
+// aces upload
+app.use("/", acesRoutes)
 // 404
 app.use((req, res) => {
   res.status(404).json({ error: "Not Found" });
