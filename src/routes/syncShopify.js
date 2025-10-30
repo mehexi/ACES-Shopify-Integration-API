@@ -1,17 +1,9 @@
-import express from "express";
+import { Router } from "express";
 import axios from "axios";
 import { Product } from "../models/Product.js";
 
-const router = express.Router();
+const router = Router();
 
-/**
- * POST /sync-shopify
- * Synchronizes MongoDB-stored products with Shopify
- *
- * Requires:
- *   - SHOPIFY_STORE_DOMAIN
- *   - SHOPIFY_ADMIN_TOKEN
- */
 router.post("/sync-shopify", async (req, res) => {
   try {
     const { SHOPIFY_STORE_DOMAIN, SHOPIFY_ADMIN_TOKEN } = process.env;
@@ -20,16 +12,17 @@ router.post("/sync-shopify", async (req, res) => {
       return res.status(400).json({ error: "Missing Shopify credentials in .env" });
     }
 
-    // 1️⃣ Fetch products from MongoDB that are not yet synced
+    // 1️⃣ Fetch unsynced products
     const unsyncedProducts = await Product.find({ synced: { $ne: true } });
+    const total = unsyncedProducts.length;
 
-    if (!unsyncedProducts.length) {
+    if (!total) {
       return res.status(200).json({ message: "No unsynced products found." });
     }
 
-    console.log(`🔄 Found ${unsyncedProducts.length} products to sync.`);
+    console.log(`🔄 Found ${total} products to sync to Shopify.`);
 
-    // 2️⃣ Create an Axios instance for Shopify API
+    // 2️⃣ Shopify API client
     const shopify = axios.create({
       baseURL: `https://${SHOPIFY_STORE_DOMAIN}/admin/api/2024-07`,
       headers: {
@@ -38,33 +31,80 @@ router.post("/sync-shopify", async (req, res) => {
       },
     });
 
+    // 3️⃣ Sync process
     const results = [];
+    let index = 0;
+    let successCount = 0;
+    let failCount = 0;
 
-    // 3️⃣ Loop through each unsynced product
     for (const p of unsyncedProducts) {
+      index++;
+      console.log(`🚀 [${index}/${total}] Uploading: ${p.title || p.sku}`);
+
       try {
-        // Prepare product data for Shopify
+        // Normalize pricing object (handle Mongoose subdocs)
+        const pricing = p.pricing?.toObject ? p.pricing.toObject() : p.pricing || {};
+
+        // Use nullish coalescing to safely select price
+// Normalize Mongoose Map or Object pricing
+let finalPrice = 0;
+if (p.pricing instanceof Map) {
+  // Handle Map type
+  finalPrice =
+    p.pricing.get("MAP") ??
+    p.pricing.get("RMP") ??
+    p.pricing.get("DLR") ??
+    p.pricing.get("MSRP") ??
+    0.0;
+} else if (typeof p.pricing === "object" && p.pricing !== null) {
+  // Handle plain object type
+  finalPrice =
+    p.pricing.MAP ??
+    p.pricing.RMP ??
+    p.pricing.DLR ??
+    p.pricing.MSRP ??
+    0.0;
+}
+        if (!finalPrice) {
+          console.warn(`⚠️ Skipping ${p.sku}: missing valid price.`);
+          results.push({
+            title: p.title,
+            sku: p.sku,
+            error: "Missing valid price — skipped",
+          });
+          continue; // skip this product
+        }
+
         const productData = {
           product: {
             title: p.title || "Untitled Product",
             body_html: p.longDesc || p.shortDesc || "",
             vendor: p.vendor || "Unknown Vendor",
-            product_type: "Auto Parts",
-            tags: ["PIES"],
+            product_type: p.category || "Auto Parts",
+            tags: [
+              "PIES",
+              p.category,
+              p.subcategory,
+              p.piesSegment,
+              p.piesBase,
+              p.piesSub,
+              p.attributes?.position,
+              p.attributes?.material,
+            ].filter(Boolean),
             status: "active",
             variants: [
               {
                 sku: p.sku,
-                price: "99.99", // default, replace if you have a price field
+                price: finalPrice,
                 inventory_management: "SHOPIFY",
-                inventory_quantity: 10,
+                inventory_quantity: p.qtyAvailable || 10,
               },
             ],
             images: p.images?.length
-              ? p.images.map(img => ({
+              ? p.images.map((img) => ({
                   src: img.startsWith("http")
                     ? img
-                    : `https://your-cdn-domain.com/${img}`, // optional CDN URL
+                    : `https://your-cdn-domain.com/${img}`,
                 }))
               : [],
           },
@@ -74,12 +114,15 @@ router.post("/sync-shopify", async (req, res) => {
         const response = await shopify.post("/products.json", productData);
         const shopifyProduct = response.data.product;
 
-        // 5️⃣ Update MongoDB to mark as synced
+        // 5️⃣ Update DB
         p.synced = true;
         p.shopifyId = shopifyProduct.id;
         await p.save();
 
-        console.log(`✅ Synced: ${p.title} (${p.sku}) → Shopify ID: ${shopifyProduct.id}`);
+        successCount++;
+        console.log(
+          `✅ [${index}/${total}] Synced: ${p.title} → Shopify ID ${shopifyProduct.id}`
+        );
 
         results.push({
           title: p.title,
@@ -87,22 +130,28 @@ router.post("/sync-shopify", async (req, res) => {
           shopifyId: shopifyProduct.id,
         });
 
-        // Respect rate limits (max 2 requests/sec)
-        await new Promise(resolve => setTimeout(resolve, 5));
+        // 🕐 Delay to respect Shopify’s API rate limits
+        await new Promise((resolve) => setTimeout(resolve, 100)); // 2 req/sec
       } catch (err) {
-        console.error(`❌ Failed to sync ${p.title || p.sku}:`, err.response?.data || err.message);
+        failCount++;
+        const errorMsg = err.response?.data?.errors || err.message;
+        console.error(`❌ [${index}/${total}] Failed: ${p.title || p.sku} →`, errorMsg);
+
         results.push({
           title: p.title,
           sku: p.sku,
-          error: err.response?.data?.errors || err.message,
+          error: errorMsg,
         });
       }
     }
 
+    // 6️⃣ Summary response
     res.json({
       success: true,
-      syncedCount: results.filter(r => r.shopifyId).length,
-      failedCount: results.filter(r => r.error).length,
+      total,
+      syncedCount: successCount,
+      failedCount: failCount,
+      message: `✅ Shopify sync completed (${successCount}/${total} successful)`,
       results,
     });
   } catch (err) {

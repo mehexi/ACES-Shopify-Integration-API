@@ -26,11 +26,11 @@ export async function shopifyGraphQL(query, variables = {}) {
 }
 
 export async function createShopifyProductAndVariant(p) {
-  // 1) productCreate (ProductInput; no options)
+  // --- [1] Create Product ---
   const productCreateMutation = `
     mutation productCreate($input: ProductInput!) {
       productCreate(input: $input) {
-        product { id title handle }
+        product { id title handle status }
         userErrors { field message }
       }
     }
@@ -38,56 +38,89 @@ export async function createShopifyProductAndVariant(p) {
 
   const productVariables = {
     input: {
-      title: p.title,
+      title: p.title || "Untitled Product",
       descriptionHtml: `
         <p><strong>${p.vendor || ""}</strong></p>
-        ${p.longDesc || "<p>No description available</p>"}
+        ${p.longDesc || "<p>No description available.</p>"}
         ${p.attributes ? `<p><b>Attributes:</b> ${p.attributes}</p>` : ""}
         ${p.dimensions ? `<p><b>Dimensions:</b> ${p.dimensions}</p>` : ""}
         ${p.weight ? `<p><b>Weight:</b> ${p.weight}</p>` : ""}
+        ${p.warranty ? `<p><b>Warranty:</b> ${p.warranty}</p>` : ""}
+        ${p.warning ? `<p><b>Warning:</b> ${p.warning}</p>` : ""}
       `,
       vendor: p.vendor || "Unknown",
-      productType: "Brake Components",
-      tags: ["PIES", p.vendor || "unknown"],
-      status: "ACTIVE"
+      productType: p.productType || "Brake Components",
+      tags: [
+        "PIES",
+        p.vendor || "unknown",
+        ...(p.tags || [])
+      ],
+      status: "ACTIVE",
+      images: (p.images || []).map((uri) => ({ src: uri }))
     }
   };
 
   const productData = await shopifyGraphQL(productCreateMutation, productVariables);
-  const product = productData.productCreate?.product;
-  const uerrs = productData.productCreate?.userErrors;
-  if (!product || (uerrs && uerrs.length)) {
-    throw new Error("Shopify productCreate failed: " + JSON.stringify(uerrs, null, 2));
+  const product = productData?.productCreate?.product;
+  const pErrs = productData?.productCreate?.userErrors;
+
+  if (!product || (pErrs && pErrs.length)) {
+    console.error("Shopify productCreate failed:", JSON.stringify(pErrs, null, 2));
+    throw new Error("❌ Failed to create product");
   }
 
-  // 2) productVariantsBulkCreate (no requiresShipping; inventoryItem.sku, tracked)
+  console.log(`✅ Product created: ${product.title} (${product.id})`);
+
+  // --- [2] Create Variant ---
   const variantMutation = `
     mutation productVariantsBulkCreate($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
       productVariantsBulkCreate(productId: $productId, variants: $variants) {
-        productVariants { id price inventoryItem { sku tracked } }
+        productVariants {
+          id
+          price
+          inventoryItem { sku tracked }
+        }
         userErrors { field message }
       }
     }
   `;
 
+  const variantInput = [
+    {
+      title: p.variantTitle || "Default",
+      price: String(p.price || "99.99"),
+      compareAtPrice: p.compareAtPrice ? String(p.compareAtPrice) : undefined,
+      inventoryQuantity: p.inventory || 10,
+      inventoryItem: {
+        sku: p.sku || `AUTO-${Math.floor(Math.random() * 999999)}`,
+        tracked: true
+      },
+      weight: p.weightValue || 15.0,
+      weightUnit: p.weightUnit || "POUNDS",
+      requiresShipping: true
+    }
+  ];
+
   const variantVariables = {
     productId: product.id,
-    variants: [
-      {
-        price: "99.99",
-        inventoryItem: {
-          sku: p.sku || `AUTO-${Math.floor(Math.random() * 999999)}`,
-          tracked: true
-        }
-      }
-    ]
+    variants: variantInput
   };
 
   const vData = await shopifyGraphQL(variantMutation, variantVariables);
-  const vErrs = vData.productVariantsBulkCreate?.userErrors;
+  const vErrs = vData?.productVariantsBulkCreate?.userErrors;
+
   if (vErrs && vErrs.length) {
-    throw new Error("Shopify productVariantsBulkCreate failed: " + JSON.stringify(vErrs, null, 2));
+    console.error("Shopify productVariantsBulkCreate failed:", JSON.stringify(vErrs, null, 2));
+    throw new Error("❌ Failed to create variant(s)");
   }
 
-  return product;
+  console.log(`✅ Variant created for ${p.sku || product.title}`);
+
+  // --- [3] Return success object ---
+  return {
+    success: true,
+    productId: product.id,
+    productHandle: product.handle,
+    variantCount: variantInput.length
+  };
 }

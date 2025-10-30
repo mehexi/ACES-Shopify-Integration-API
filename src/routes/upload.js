@@ -26,41 +26,55 @@ const upload = multer({ storage });
 // form-data key: pies (file)
 router.post("/upload", upload.single("pies"), async (req, res, next) => {
   const syncToShopify = (process.env.SYNC_TO_SHOPIFY || "false").toLowerCase() === "true";
+
   try {
     const filePath = req.file?.path;
     if (!filePath) return res.status(400).json({ error: "No PIES file uploaded" });
 
     const xmlBuffer = fs.readFileSync(filePath);
     const parsedProducts = await parsePies(xmlBuffer);
-    console.log(`Parsed ${parsedProducts.length} products from PIES`);
+    console.log(`📦 Parsed ${parsedProducts.length} products from PIES file.`);
 
-    // Upsert to DB by SKU
+    const total = parsedProducts.length;
+    let uploaded = 0;
+
     const results = [];
-    for (const p of parsedProducts) {
+
+    for (let i = 0; i < total; i++) {
+      const p = parsedProducts[i];
       if (!p.sku) continue;
-      const update = { $set: p };
-      const saved = await Product.findOneAndUpdate({ sku: p.sku }, update, {
-        new: true, upsert: true, setDefaultsOnInsert: true
-      });
+
+      // Log progress before upload
+      console.log(`🚀 Uploading to Shopify: ${i + 1} / ${total} → ${p.sku}`);
+      // Save to DB
+      const saved = await Product.findOneAndUpdate(
+        { sku: p.sku },
+        { $set: p },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      );
       results.push(saved);
 
-      // optionally push to Shopify (sequential to respect rate limits)
+      // Shopify upload
       if (syncToShopify) {
         try {
-          await createShopifyProductAndVariant(p);
-        } catch (e) {
-          console.warn(`⚠️ Shopify sync failed for SKU ${p.sku}:`, e.message);
+          const result = await createShopifyProductAndVariant(p);
+          uploaded++;
+          console.log(`✅ Uploaded ${uploaded}/${total}: ${p.sku} (${result.productHandle})`);
+        } catch (err) {
+          console.warn(`⚠️ Shopify sync failed for SKU ${p.sku}:`, err.message);
         }
       }
     }
 
-    // delete the uploaded file
+    // cleanup
     fs.unlink(filePath, () => {});
 
     res.json({
       status: "ok",
+      parsed: total,
+      uploaded: uploaded,
       stored: results.length,
-      sample: parsedProducts.slice(0, 1)
+      message: `✅ Upload completed (${uploaded}/${total})`
     });
   } catch (err) {
     next(err);
